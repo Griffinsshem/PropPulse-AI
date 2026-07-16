@@ -1,5 +1,6 @@
 from app.models.base import Base, TimestampedModel
 from app.models.email_verification_token import EmailVerificationToken
+from app.models.oauth_identity import OAuthIdentity
 from app.models.password_reset_token import PasswordResetToken
 from app.models.permission import Permission
 from app.models.refresh_token import RefreshToken
@@ -17,4 +18,5 @@ __all__ = [
     "RefreshToken",
     "EmailVerificationToken",
     "PasswordResetToken",
+    "OAuthIdentity",
 ]
