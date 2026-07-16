@@ -1,3 +1,4 @@
+from app.models.audit_log import AuditLog
 from app.models.base import Base, TimestampedModel
 from app.models.email_verification_token import EmailVerificationToken
 from app.models.oauth_identity import OAuthIdentity
@@ -19,4 +20,5 @@ __all__ = [
     "EmailVerificationToken",
     "PasswordResetToken",
     "OAuthIdentity",
+    "AuditLog",
 ]
