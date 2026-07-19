@@ -287,6 +287,57 @@ class AuthService:
 
         return new_access_token, new_raw_refresh_token
 
+    def logout(
+        self,
+        *,
+        raw_refresh_token: str,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> None:
+        """Implements FR-5 (single session logout). Idempotent by
+        design: logging out with an already-invalid or unknown token
+        is treated as a no-op success, not an error, so a logout
+        endpoint never leaks information about token validity and
+        callers never need to handle a 'logout failed' case for
+        something as low-stakes as an already-expired session."""
+        now = datetime.now(timezone.utc)
+        token_hash = hash_token(raw_refresh_token)
+        existing_token = self._refresh_token_repo.get_by_token_hash(token_hash)
+
+        if existing_token is None:
+            return
+
+        self._refresh_token_repo.revoke(existing_token.id, now)
+        self._audit_repo.record(
+            user_id=existing_token.user_id,
+            event_type="logout",
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        self._session.commit()
+
+    def logout_all(
+        self,
+        *,
+        user_id: uuid.UUID,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> None:
+        """Implements FR-5 (all-sessions logout). Takes a user_id
+        directly rather than a token, since this is only reachable
+        from an already-authenticated context (the caller proved
+        identity via a valid access token to reach this endpoint,
+        per Section 7's @require_auth decorator on the route)."""
+        now = datetime.now(timezone.utc)
+        self._refresh_token_repo.revoke_all_for_user(user_id, now)
+        self._audit_repo.record(
+            user_id=user_id,
+            event_type="logout_all",
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        self._session.commit()
+
     def _record_failed_login(self, user: User, now: datetime) -> None:
         """Increments the failure counter and locks the account if
         the threshold is reached.
