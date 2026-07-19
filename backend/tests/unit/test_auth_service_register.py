@@ -9,6 +9,7 @@ from app.core.security import hash_token
 from app.models.email_verification_token import EmailVerificationToken
 from app.models.role import Role
 from app.repositories.audit_log_repository import AuditLogRepository
+from app.repositories.refresh_token_repository import RefreshTokenRepository
 from app.repositories.role_repository import RoleRepository
 from app.repositories.user_repository import UserRepository
 from app.services.auth_service import (
@@ -54,8 +55,10 @@ def auth_service(db_session):
         session=db_session,
         user_repo=UserRepository(db_session),
         role_repo=RoleRepository(db_session),
+        refresh_token_repo=RefreshTokenRepository(db_session),
         audit_repo=AuditLogRepository(db_session),
         email_sender=SpyEmailSender(),
+        jwt_secret_key="test-secret-key-not-used-in-production-32b",
     )
     return service
 
