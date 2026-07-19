@@ -64,6 +64,17 @@ class AccountLockedError(Exception):
         super().__init__(f"Account locked until {locked_until.isoformat()}")
 
 
+class InvalidRefreshTokenError(Exception):
+    """Raised when a presented refresh token is missing, expired, or
+    invalid. Also raised (deliberately, with no different behavior
+    visible to the caller) when a token is detected as REUSED after
+    rotation — the theft-detection case. An attacker who replays a
+    stolen, already-rotated token sees the exact same error as
+    someone who just typed garbage; only the audit log and the
+    silent full-family revocation reveal that something more
+    serious happened."""
+
+
 class AuthService:
     """Business logic for authentication and account lifecycle:
     registration, email verification, login, token refresh, and
@@ -201,6 +212,80 @@ class AuthService:
         self._session.commit()
 
         return access_token, raw_refresh_token, user
+
+    def refresh(
+        self,
+        *,
+        raw_refresh_token: str,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> tuple[str, str]:
+        """Implements FR-4: rotates a refresh token on every use and
+        detects theft via reuse of an already-revoked token. Returns
+        (new_access_token, new_raw_refresh_token) on success.
+
+        Raises InvalidRefreshTokenError for every failure case:
+        token not found, expired, or reused-after-rotation. These
+        are deliberately indistinguishable to the caller — only the
+        internal handling differs (a reuse triggers full family
+        revocation; a simple not-found does not, since there is no
+        family to revoke)."""
+        now = datetime.now(timezone.utc)
+        token_hash = hash_token(raw_refresh_token)
+        existing_token = self._refresh_token_repo.get_by_token_hash(token_hash)
+
+        if existing_token is None or existing_token.expires_at <= now:
+            raise InvalidRefreshTokenError("Invalid or expired refresh token.")
+
+        if existing_token.is_revoked:
+            # Theft signal: this exact token was already rotated away.
+            # Revoke every token in the family, not just this one.
+            self._refresh_token_repo.revoke_family(existing_token.family_id, now)
+            self._audit_repo.record(
+                user_id=existing_token.user_id,
+                event_type="refresh_token_reuse_detected",
+                description="A previously-rotated refresh token was reused; entire token family revoked.",
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+            self._session.commit()
+            raise InvalidRefreshTokenError("Invalid or expired refresh token.")
+
+        user = self._user_repo.get_by_id(existing_token.user_id)
+        if user is None or not user.is_active:
+            raise InvalidRefreshTokenError("Invalid or expired refresh token.")
+
+        # Normal rotation: revoke the presented token, issue a new one
+        # sharing the SAME family_id so a future reuse can still be
+        # detected as belonging to this login's lineage.
+        self._refresh_token_repo.revoke(existing_token.id, now)
+
+        role = self._role_repo.get_by_id(user.role_id)
+        new_access_token = create_access_jwt(
+            user_id=str(user.id),
+            role=role.name if role is not None else "unknown",
+            secret_key=self._jwt_secret_key,
+        )
+        new_raw_refresh_token = generate_secure_token()
+        self._refresh_token_repo.create(
+            user_id=user.id,
+            token_hash=hash_token(new_raw_refresh_token),
+            family_id=existing_token.family_id,
+            expires_at=now + timedelta(days=REFRESH_TOKEN_TTL_DAYS),
+            user_agent=user_agent,
+            ip_address=ip_address,
+        )
+
+        self._audit_repo.record(
+            user_id=user.id,
+            event_type="token_refreshed",
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+
+        self._session.commit()
+
+        return new_access_token, new_raw_refresh_token
 
     def _record_failed_login(self, user: User, now: datetime) -> None:
         """Increments the failure counter and locks the account if
