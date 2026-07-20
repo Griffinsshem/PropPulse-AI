@@ -75,6 +75,12 @@ class InvalidRefreshTokenError(Exception):
     serious happened."""
 
 
+class InvalidVerificationTokenError(Exception):
+    """Raised when an email verification token is missing, expired,
+    or already used. Deliberately generic — the caller has no
+    legitimate need to distinguish these cases (Section 6)."""
+
+
 class AuthService:
     """Business logic for authentication and account lifecycle:
     registration, email verification, login, token refresh, and
@@ -139,6 +145,25 @@ class AuthService:
         )
 
         return user
+
+    def verify_email(self, *, raw_token: str) -> None:
+        """Implements FR-2 (verification confirmation). Raises
+        InvalidVerificationTokenError if the token is missing,
+        expired, or already used."""
+        now = datetime.now(timezone.utc)
+        token = self._email_verification_repo.get_valid_by_token_hash(
+            hash_token(raw_token), now=now
+        )
+        if token is None:
+            raise InvalidVerificationTokenError("Invalid or expired verification token.")
+
+        self._email_verification_repo.mark_used(token.id, now)
+        self._user_repo.set_email_verified(token.user_id)
+        self._audit_repo.record(
+            user_id=token.user_id,
+            event_type="email_verified",
+        )
+        self._session.commit()
 
     def login(
         self,
