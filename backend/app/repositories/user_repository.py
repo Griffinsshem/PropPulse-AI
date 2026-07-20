@@ -59,6 +59,14 @@ class UserRepository(BaseRepository):
         if user is not None:
             user.role_id = role_id
 
+    def set_password_hash(self, user_id: uuid.UUID, password_hash: str) -> None:
+        """Used by password reset confirmation. Only ever receives
+        an already-hashed value (hash_password() output) — never
+        the plaintext new password."""
+        user = self._session.get(User, user_id)
+        if user is not None:
+            user.password_hash = password_hash
+
     def update_last_login(self, user_id: uuid.UUID, when: datetime) -> None:
         user = self._session.get(User, user_id)
         if user is not None:

@@ -14,6 +14,7 @@ from app.core.security import (
     verify_password,
 )
 from app.models.email_verification_token import EmailVerificationToken
+from app.models.password_reset_token import PasswordResetToken
 from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.refresh_token_repository import RefreshTokenRepository
@@ -81,6 +82,12 @@ class InvalidVerificationTokenError(Exception):
     legitimate need to distinguish these cases (Section 6)."""
 
 
+class InvalidResetTokenError(Exception):
+    """Raised when a password reset token is missing, expired, or
+    already used. Deliberately generic — same reasoning as every
+    other token-related error in this service (Section 6)."""
+
+
 class AuthService:
     """Business logic for authentication and account lifecycle:
     registration, email verification, login, token refresh, and
@@ -107,6 +114,7 @@ class AuthService:
         self._email_sender = email_sender
         self._jwt_secret_key = jwt_secret_key
         self._email_verification_repo = TokenRepository(session, EmailVerificationToken)
+        self._password_reset_repo = TokenRepository(session, PasswordResetToken)
 
     def register(self, *, email: str, password: str, role_name: str) -> User:
         """Implements FR-1 and FR-2 (registration + verification
@@ -162,6 +170,68 @@ class AuthService:
         self._audit_repo.record(
             user_id=token.user_id,
             event_type="email_verified",
+        )
+        self._session.commit()
+
+    def request_password_reset(
+        self, *, email: str, ip_address: str | None = None
+    ) -> None:
+        """Implements FR-6, first half. Deliberately has IDENTICAL
+        external behavior whether or not the email belongs to a
+        real account: no exception, no return value indicating
+        which case occurred. Per Section 6, the API layer always
+        responds with 'if an account with that email exists, a
+        reset link has been sent' regardless of what happens here.
+        If the user genuinely doesn't exist, this method does
+        nothing at all — no audit log, no email — since there is no
+        real account to attribute either to."""
+        user = self._user_repo.get_by_email(email)
+        if user is None:
+            return
+
+        raw_token = generate_secure_token()
+        self._password_reset_repo.create(
+            user_id=user.id,
+            token_hash=hash_token(raw_token),
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=30),
+            ip_address=ip_address,
+        )
+        self._audit_repo.record(
+            user_id=user.id,
+            event_type="password_reset_requested",
+            ip_address=ip_address,
+        )
+        self._session.commit()
+
+        self._email_sender.send_password_reset_email(to_email=email, raw_token=raw_token)
+
+    def confirm_password_reset(
+        self,
+        *,
+        raw_token: str,
+        new_password: str,
+        ip_address: str | None = None,
+    ) -> None:
+        """Implements FR-6, second half. Raises InvalidResetTokenError
+        if the token is missing, expired, or already used. On
+        success, revokes ALL of the user's existing refresh tokens
+        — per our design discussion, if the account was compromised
+        and this reset is the recovery step, an attacker's existing
+        session must not survive it."""
+        now = datetime.now(timezone.utc)
+        token = self._password_reset_repo.get_valid_by_token_hash(hash_token(raw_token), now=now)
+        if token is None:
+            raise InvalidResetTokenError("Invalid or expired password reset token.")
+
+        new_password_hash = hash_password(new_password)
+        self._user_repo.set_password_hash(token.user_id, new_password_hash)
+        self._password_reset_repo.mark_used(token.id, now)
+        self._refresh_token_repo.revoke_all_for_user(token.user_id, now)
+
+        self._audit_repo.record(
+            user_id=token.user_id,
+            event_type="password_reset_completed",
+            ip_address=ip_address,
         )
         self._session.commit()
 
