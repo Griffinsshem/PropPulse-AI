@@ -59,3 +59,52 @@ def db_session(engine, tables):
     session.close()
     transaction.rollback()
     connection.close()
+
+
+@pytest.fixture
+def app(tables):
+    """Builds a real Flask app configured against the test database.
+    Depends on the `tables` fixture (not `db_session`) since routes
+    build their own sessions per-request via db_session() — using
+    the rollback-per-test db_session fixture here would conflict
+    with that, since the app needs its own live connection to
+    actually commit data that a subsequent request can then see."""
+    from app import create_app
+    from app.core.config import TestConfig
+
+    flask_app = create_app(TestConfig)
+    flask_app.config.update(TESTING=True)
+    yield flask_app
+
+
+@pytest.fixture
+def client(app, engine):
+    """Flask's test client: lets tests make real HTTP requests
+    (client.post('/api/v1/auth/register', json={...})) against the
+    app without actually running a server.
+
+    Integration tests commit real data via their own request-scoped
+    sessions (see app fixture), so they can't rely on db_session's
+    rollback-based isolation. Cleanup is scoped to ONLY tests that
+    request this `client` fixture, rather than being a global
+    autouse fixture — that earlier design caused lock contention
+    with db_session's still-open connection in unrelated unit
+    tests, hanging the whole suite. Scoping cleanup to client's own
+    teardown avoids that ordering ambiguity entirely."""
+    test_client = app.test_client()
+    yield test_client
+
+    with engine.begin() as connection:
+        table_names = [
+            "audit_logs",
+            "refresh_tokens",
+            "email_verification_tokens",
+            "password_reset_tokens",
+            "oauth_identities",
+            "users",
+            "role_permissions",
+            "permissions",
+            "roles",
+        ]
+        for table_name in table_names:
+            connection.execute(text(f"TRUNCATE TABLE {table_name} CASCADE"))
